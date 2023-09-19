@@ -1,0 +1,204 @@
+#!/bin/sh
+
+givup() {
+        echo $*
+        exit 1
+}
+
+usage() {
+echo "$0 --extname=module [--skel=dir] [--extdir=dir]"
+echo ""
+echo "  --extname=module   module is the name of your extension"
+echo "  --skel=dir         path to the skeleton directory"
+echo "  --extdir=dir       path to the extension directory"
+exit 1
+}
+
+if test $# = 0; then
+  usage
+fi
+
+while test $# -gt 0; do
+  case "$1" in
+  -*=*) optarg=`echo "$1" | sed 's/[-_a-zA-Z0-9]*=//'` ;;
+  *) optarg= ;;
+  esac
+
+  case $1 in
+    --extname=?*)
+        extname=$optarg
+        EXTNAME=`echo $extname | tr "[:lower:]" "[:upper:]"`
+        ;;
+    --skel=?*)
+        skel_dir=$optarg
+        ;;
+    --extdir=?*)
+        ext_dir=$optarg
+        ;;
+    *)
+        usage
+        ;;
+  esac
+  shift
+done
+
+if test -z "$ext_dir"; then
+  ext_dir="../libs"
+fi
+
+if test -d "$ext_dir/$extname" ; then
+  givup "Directory $extname already exists."
+fi
+
+if test -z "$skel_dir"; then
+  skel_dir="skeleton"
+fi
+
+## convert skel_dir to full path
+skel_dir=`cd $skel_dir && pwd`
+
+test -d $skel_dir || givup "directory $skel_dir does not exist or is not directory"
+
+if echo '\c' | grep -s c >/dev/null 2>&1
+then
+    ECHO_N="echo -n"
+    ECHO_C=""
+else
+    ECHO_N="echo"
+    ECHO_C='\c'
+fi
+
+echo "Creating directory $extname"
+mkdir $ext_dir/$extname || givup "Cannot create directory $extname"
+
+cd $ext_dir/$extname
+chmod 755 .
+
+$ECHO_N "Creating basic files:$ECHO_C"
+
+$ECHO_N " config.m4$ECHO_C"
+cat >config.m4 <<eof
+dnl config.m4 for extension $extname
+
+PHP_ARG_ENABLE($extname, whether to enable $extname support,
+dnl Make sure that the comment is aligned:
+[  --enable-$extname           Enable $extname support])
+
+if test "\$PHP_$EXTNAME" != "no"; then
+  dnl Write more examples of tests here...
+
+  PHP_SUBST(${EXTNAME}_SHARED_LIBADD)
+
+  PHP_REQUIRE_CXX()
+  PHP_ADD_LIBRARY(stdc++, 1, ${EXTNAME}_SHARED_LIBADD)
+  PHP_NEW_EXTENSION($extname, src/$extname.cpp, \$ext_shared)
+fi
+eof
+
+$ECHO_N " $extname.cpp$ECHO_C"
+mkdir src || givup "Cannot create src directory."
+echo "s/extname/$extname/g" > sedscript
+echo "s/EXTNAME/$EXTNAME/g"  >> sedscript
+sed -f sedscript < $skel_dir/skeleton.cpp > src/$extname.cpp
+
+$ECHO_N " $extname.h$ECHO_C"
+mkdir include || givup "Cannot create include directory."
+echo "s/extname/$extname/g" > sedscript
+echo "s/EXTNAME/$EXTNAME/g" >> sedscript
+sed -f sedscript <$skel_dir/skeleton.h > include/$extname.h
+
+$ECHO_N " $extname.php$ECHO_C"
+mkdir script || givup "Cannot create script directory."
+sed -e "s/extname/$extname/g" <$skel_dir/skeleton.php > script/index.php
+
+$ECHO_N " $extname.vdir.conf$ECHO_C"
+mkdir config || givup "Cannot create conf directory."
+echo "s/extname/$extname/g" > sedscript
+echo "s/EXTNAME/$EXTNAME/g" >> sedscript
+echo "s|extpath|$(echo `pwd`)|" >> sedscript
+sed -f sedscript <$skel_dir/skeleton.vdir.conf > config/$extname.vdir.conf
+
+$ECHO_N " build.sh$ECHO_C"
+cat >build.sh <<eof
+#!/bin/sh
+
+cat >config/$extname.vdir.conf <<EOF
+<ifModule mod_alias.c="">
+   Alias /$EXTNAME "$(echo \`pwd\`)/script"
+   <Directory "$(echo \`pwd\`)/script">
+      Order allow, deny
+      Allow from all
+   </Directory>
+</IfModule>
+EOF
+
+make clean;
+
+old_string=\`grep PHP_NEW_EXTENSION config.m4\`
+
+if [ ! -z "\$old_string" ]; then
+
+prefix=\$(echo \$old_string | awk -F, '{print \$1}')
+postfix=\$(echo \$old_string | awk -F, '{print \$3}')
+
+# get source files
+filelist=\$(echo \`find src -type f -name '*.cpp' -o -name '*.cc'\`)
+
+if [ ! -z "\$filelist" ]; then
+
+new_string="\$prefix, \$filelist, \$postfix"
+
+## change config.m4
+sed -e "s|\${old_string}|\${new_string}|" <config.m4 >config.m4.temp
+
+rm config.m4
+mv config.m4.temp config.m4
+
+phpize;
+./configure --enable-$extname;
+
+make;
+if test -f build/$extname.so; then
+    givup "Check error!"  
+fi
+
+sudo make install;
+
+# modify php.ini
+if test -f /usr/local/etc/php.ini; then
+   if test \`grep \;extension=$extname.so /usr/local/etc/php.ini\`; then
+      sudo sed -i -e "s/;extension=$extname.so/extension=$extname.so/" /usr/local/etc/php.ini
+   elif test \`grep extension=$extname.so /usr/local/etc/php.ini\`; then
+      # echo '$extname.so exist
+   else
+      echo "extension=$extname.so" | sudo tee -a /usr/local/etc/php.ini
+   fi
+fi
+
+# modify httpd service
+if test -d /usr/local/etc/apache22/vdir.d; then
+   # echo 'virtual directory exist'
+else
+   sudo mkdir /usr/local/etc/apache22/vdir.d
+fi
+sudo cp config/$extname.vdir.conf /usr/local/etc/apache22/vdir.d/httpd-$extname.vdir.conf
+sudo httpd -k restart
+
+
+fi
+fi
+eof
+
+rm sedscript
+
+find . -type f | xargs chmod 644
+find . -type d | xargs chmod 755
+
+chmod 744 build.sh
+
+echo " [done]."
+
+cat << eof
+
+$warning
+eof
